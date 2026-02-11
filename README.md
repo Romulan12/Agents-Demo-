@@ -374,12 +374,6 @@ Contributions are welcome! Please:
 
 ---
 
-## 📄 License
-
-[Add your license here]
-
----
-
 ## 🙏 Acknowledgments
 
 - Built with [LlamaIndex](https://www.llamaindex.ai/)
