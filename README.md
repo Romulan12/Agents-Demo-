@@ -386,11 +386,6 @@ Contributions are welcome! Please:
 - UI powered by [Gradio](https://gradio.app/)
 - Inspired by the ReAct paper: [Yao et al., 2023](https://arxiv.org/abs/2210.03629)
 
----
-
-## 📞 Contact
-
-[Add your contact information]
 
 ---
 
