@@ -1,4 +1,4 @@
-# 🧠 Advanced Agentic RAG System
+# 🧠 Multi-agent RAG System 
 
 An intelligent multi-agent system for research paper analysis, question answering, and blog generation using advanced reasoning patterns.
 
