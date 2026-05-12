@@ -1,415 +1,226 @@
-# 🧠 Multi-agent RAG System 
+# Agentic RAG
 
-An intelligent multi-agent system for research paper analysis, question answering, and blog generation using advanced reasoning patterns.
-
-## ✨ Features
-
-### 🤖 **Multi-Agent Architecture**
-- **Router Agent**: LLM-powered intent detection with explainable routing decisions
-- **Q&A Agent**: Multi-step autonomous reasoning using ReAct pattern
-- **Blog Writer Agent**: Intelligent content generation with automatic source selection
-
-### 🧠 **Advanced Reasoning**
-- **ReAct Pattern**: Reasoning + Acting for complex multi-step queries
-- **Autonomous Tool Selection**: Agent decides which tools to use and when
-- **Transparent Reasoning**: See the agent's thought process step-by-step
-- **Iterative Refinement**: Up to 10 reasoning iterations for complex queries
-
-### 🛡️ **Anti-Hallucination Protection**
-- **Relevance Checking**: Vector tools verify query relevance before responding
-- **Explicit Acknowledgment**: System states when information isn't found in papers
-- **No False Information**: Tools return "No relevant information found" instead of making up answers
-- **Source Verification**: Final answers only include information from actual tool outputs
-- **Smart Fallback**: Automatically uses web search when papers don't contain relevant information
-
-### 📚 **Flexible Paper Sources**
-- Load existing PDFs from local directory
-- Auto-download papers from arXiv
-- Upload custom PDFs
-- Web search fallback when papers unavailable
-
-### 🔍 **Intelligent Search**
-- Vector search across paper content
-- Semantic similarity matching
-- Web search integration
-- Multi-source information synthesis
-
-### ✍️ **Smart Content Generation**
-- Automatic topic extraction
-- Style customization (Technical/Professional/Casual)
-- Length control (300-800 words)
-- Source attribution
+A multi-agent research assistant built on **LangGraph**. A router supervises three specialized agents — Q&A, blog writer, and academic paper writer — each running a ReAct loop over a whitelisted toolset (vector search, arXiv, web). Guardrails, query expansion, and human-in-the-loop are first-class graph nodes. Fully traced via LangSmith.
 
 ---
 
-## 🚀 Quick Start
+## Features
 
-### Prerequisites
+- **Multi-agent orchestration** — router dispatches to `qa` / `blog` / `academic` based on intent.
+- **ReAct inner loops** with autonomous tool selection inside each agent.
+- **RAG over local PDFs** via Chroma (one collection per paper + a shared cross-paper collection).
+- **Auto-ingest from arXiv** — the `arxiv_download` tool indexes new papers on the fly.
+- **Web search + scrape** fallback when indexed papers don't cover the topic.
+- **Guardrails as graph nodes** — prompt-injection / scope check on input; hallucination check against actual tool observations on output.
+- **Query expansion** — structured rewrite (intent + key concepts + search terms + scope constraints) before blog/academic; skipped for Q&A to keep simple queries fast.
+- **Human-in-the-loop** — the academic agent uses LangGraph `interrupt()` to pause after producing an outline, then resumes once the user approves or revises.
+- **Persistent per-thread memory** — every conversation is checkpointed to SQLite (`SqliteSaver`), so sessions resume across restarts by `thread_id`.
+- **Streaming UI** — Gradio renders tokens as they arrive.
+- **Two-tier model routing** — lightweight nodes (guards, router, expansion) use a Haiku-tier model; agents use Sonnet-tier. ~30–50% lower end-to-end latency.
+- **LangSmith Hub prompt versioning** — prompts pull from the hub at startup with in-code fallback if hub is unreachable.
+- **Provider-agnostic LLM layer** — works against any OpenAI-compatible endpoint (real OpenAI, LiteLLM gateways, Azure proxies, local vLLM). Set `OPENAI_BASE_URL`.
 
-- Python 3.8+
-- OpenAI API key
+---
 
-### Installation
+## Architecture
 
-1. **Clone the repository**
-```bash
-git clone <repository-url>
-cd Agentic
+```
+                         ┌───────────────────────────────────────┐
+                         │   app.py — Gradio UI (port 7860)      │
+                         │   • Chat tab • Papers tab             │
+                         │   • Streaming • Threaded memory       │
+                         └────────────────┬──────────────────────┘
+                                          │ user message
+                                          ▼
+                         ┌───────────────────────────────────────┐
+                         │   src/graph.py — LangGraph compiled   │
+                         │   StateGraph[AgentState]              │
+                         │   Checkpoints: SqliteSaver            │
+                         │   Tracing: LangSmith (auto)           │
+                         └────────────────┬──────────────────────┘
+                                          │
+                                          ▼
+                          ┌─────────────────────────┐
+                          │  input_guard            │  fast model
+                          └────────┬────────────────┘
+                            blocked│        passed
+                          ┌────────┘                ▼
+                          ▼                ┌─────────────────────┐
+                         END               │  router             │  fast model
+                                           └────┬────────────────┘
+                                                │
+                          ┌─────────────────────┼────────────────────────┐
+                          │ qa                  │ blog | academic        │
+                          ▼                     ▼                        │
+                  ┌──────────────┐    ┌─────────────────────┐             │
+                  │ qa_agent     │    │  query_expansion    │  fast model │
+                  │ ReAct        │    └──────────┬──────────┘             │
+                  └──────┬───────┘               ▼                        │
+                         │            ┌─────────────────────┐             │
+                         │            │ blog_agent  /       │             │
+                         │            │ academic_agent      │             │
+                         │            │ (HITL via interrupt)│             │
+                         │            └──────────┬──────────┘             │
+                         └────────────┬──────────┘                        │
+                                      ▼                                   │
+                          ┌─────────────────────────┐                     │
+                          │  output_guard           │  fast model         │
+                          └────────┬────────────────┘                     │
+                                   ▼                                      │
+                                  END  ◄──────────────────────────────────┘
 ```
 
-2. **Install dependencies**
+Tools live in `src/tools/` and are whitelisted per agent (`QA_TOOLS`, `BLOG_TOOLS`, `ACADEMIC_TOOLS`):
+
+| Tool | Source |
+|---|---|
+| `vector_search`, `summarize_paper`, `list_indexed_papers` | Chroma |
+| `arxiv_search`, `arxiv_download` (auto-ingests) | arXiv |
+| `web_search`, `scrape_url` | DuckDuckGo + requests |
+
+---
+
+## Quickstart
+
 ```bash
+# 1. Create venv and install deps
+python -m venv venv_agentic
+source venv_agentic/bin/activate
 pip install -r requirements.txt
+
+# 2. Configure
+cp .env.example .env
+# Edit .env — set OPENAI_API_KEY, OPENAI_BASE_URL, LLM_MODEL, FAST_LLM_MODEL,
+# EMBEDDING_MODEL, and (optionally) LANGSMITH_* for tracing/prompts.
+
+# 3. (Optional) Pre-index any PDFs in datasets/ into Chroma
+python -m src.rag.ingest
+
+# 4. Run
+python app.py
 ```
 
-3. **Set up API key**
-```bash
-export OPENAI_API_KEY='your-api-key-here'
-```
+Open http://127.0.0.1:7860 in a browser.
 
-4. **Run the application**
-```bash
-python gradio_app_single_agent.py
-```
+---
 
-5. **Open in browser**
+## Configuration
+
+All config is loaded from `.env` at startup. The key vars:
+
+| Var | Required | Purpose |
+|---|---|---|
+| `OPENAI_API_KEY` | yes | Bearer token for the OpenAI-compatible endpoint. |
+| `OPENAI_BASE_URL` | no | Gateway URL. Blank → hits `api.openai.com` directly. |
+| `LLM_MODEL` | yes | Main agent model (e.g. `openai:claude-sonnet-4-6`). Format is `provider:model`. |
+| `FAST_LLM_MODEL` | no | Cheaper/faster model for guards, router, expansion (e.g. `openai:claude-haiku-4-5`). Blank → reuses `LLM_MODEL`. |
+| `EMBEDDING_MODEL` | yes | Embedding model recognized by your endpoint (e.g. `amazon.titan-embed-text-v2:0`, `text-embedding-3-small`). |
+| `LANGSMITH_TRACING` | no | `true` to enable LangSmith trace upload. |
+| `LANGSMITH_API_KEY` | only if tracing/prompts | LangSmith key. |
+| `LANGSMITH_PROJECT` | no | Tracing project name. |
+| `LANGSMITH_PROMPTS` | no | `true` to pull prompts from LangSmith Hub at startup. |
+| `LANGSMITH_PROMPTS_OWNER` | only if pulling prompts | Your workspace handle/UUID. |
+| `LANGSMITH_PROMPTS_REPO` | no | Hub repo prefix for the three prompt entries. |
+| `PROMPT_REVISION` | no | `latest` or a specific commit hash. |
+| `DATASETS_DIR` / `CHROMA_DIR` / `CHECKPOINT_DB` | no | Filesystem paths. |
+| `MAX_REACT_ITERATIONS` | no | Cap on ReAct loop iterations per agent (default 4). |
+
+---
+
+## Project structure
+
 ```
-http://127.0.0.1:7860
+app.py                          Gradio UI entrypoint
+requirements.txt
+.env.example                    Template — copy to .env
+
+src/
+  config.py                     Settings dataclass, loads .env
+  state.py                      AgentState (TypedDict shared across nodes)
+  graph.py                      Main LangGraph wiring
+  llm_client.py                 ChatOpenAI / OpenAIEmbeddings factory (provider-agnostic)
+  llm.py                        Backward-compat re-exports
+  prompts.py                    LangSmith Hub pull with fallback
+  tracing.py                    LangSmith trace init
+
+  agents/
+    router.py                   Picks qa | blog | academic
+    qa_agent.py                 ReAct over QA_TOOLS
+    blog_agent.py               ReAct over BLOG_TOOLS (incl. BLOG_SYSTEM_PROMPT)
+    academic_agent.py           Subgraph: research → outline → (interrupt) → paper
+    query_expansion.py          Structured intent/concepts/terms rewrite
+
+  guardrails/
+    input_guard.py              Prompt injection + scope check
+    output_guard.py             Hallucination check vs tool observations
+
+  rag/
+    ingest.py                   PDF → chunks → Chroma (idempotent per paper)
+    store.py                    Chroma collection factory + retriever helpers
+
+  tools/
+    __init__.py                 Per-agent tool whitelists
+    retrieval.py                vector_search, summarize_paper, list_indexed_papers
+    arxiv.py                    arxiv_search, arxiv_download (auto-ingests)
+    web.py                      web_search, scrape_url
+
+scripts/
+  push_prompts.py               One-time push of in-code prompts to LangSmith Hub
+                                (optional — requires a key with prompt-write perms)
+
+datasets/                       Drop PDFs here for ingestion (gitignored content)
+data/                           Chroma store + checkpoint sqlite (gitignored)
 ```
 
 ---
 
-## 💻 Usage
+## How prompts work
 
-### Question Answering
+Each agent owns its system prompt as a module-level constant in its own file (so the prompt is reviewable in code). At runtime, `pull_prompt_or(<hub-name>, <local-constant>)` tries to pull from LangSmith Hub; if the hub is unreachable, the prompt isn't there, or `LANGSMITH_PROMPTS=false`, it falls back to the local constant. Result is cached per-process.
 
-Ask questions about your research papers:
+To version a prompt:
 
-```
-"What are the main approaches in RAG systems?"
-"Compare autonomous agents across these papers"
-"Explain the key concepts in this research"
-```
-
-The system will:
-1. Route to Q&A Agent
-2. Load relevant papers
-3. Perform multi-step reasoning
-4. Synthesize comprehensive answer
-
-### Blog Generation
-
-Request blog posts on topics:
-
-```
-"Write a blog on computer vision applications"
-"Create a technical article about transformers"
-"Generate a professional post on RAG systems"
-```
-
-The system will:
-1. Route to Blog Writer Agent
-2. Extract topic from request
-3. Find relevant papers or use web search
-4. Generate structured blog post
+1. Edit the constant in code (e.g. `BLOG_SYSTEM_PROMPT` in `src/agents/blog_agent.py`).
+2. Either run `python scripts/push_prompts.py` (if your key has write permissions) or paste the new text into the corresponding hub entry in the LangSmith UI.
+3. Restart the app — the new prompt is loaded.
 
 ---
 
-## 📊 System Architecture
+## How the academic HITL flow works
 
-```
-User Query
-    ↓
-┌─────────────────────────────────────┐
-│   Router Agent (LLM-Powered)       │
-│   - Intent detection                │
-│   - Confidence scoring              │
-│   - Explainable routing             │
-└─────────────┬───────────────────────┘
-              │
-    ┌─────────┴─────────┐
-    │                   │
-    ▼                   ▼
-┌─────────┐      ┌──────────────┐
-│ Q&A     │      │ BLOG WRITER  │
-│ AGENT   │      │ AGENT        │
-└─────────┘      └──────────────┘
-    │                   │
-    ▼                   ▼
-ReAct Agent      SmartBlogWriter
-(26 tools)       (Source selection)
-```
+1. `router` picks `academic`.
+2. `query_expansion` enriches the request.
+3. Inside the academic subgraph: `research` (ReAct over arXiv + vector search) → `outline` (structured Pydantic outline) → `interrupt`.
+4. The graph **pauses**. Gradio surfaces the outline and an approval/revision form.
+5. User approves → graph resumes → `paper` node generates section-by-section.
+6. User revises → graph resumes with feedback → `outline` regenerates and pauses again.
+7. Final paper goes through `output_guard` then back to the user.
 
-For detailed architecture, see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
+State is checkpointed throughout, so you can close the browser and resume from the same outline next time you load the thread.
 
 ---
 
-## 🎯 Key Components
+## Adding a new agent
 
-### Router Agent
-- **Purpose**: Intelligent query routing
-- **Method**: LLM-powered intent detection
-- **Output**: Routing decision with confidence score
-- **Fallback**: Keyword-based classification
-
-### Q&A Agent (ReAct)
-- **Purpose**: Answer complex questions
-- **Method**: Multi-step reasoning with tools
-- **Tools**: 24 paper tools + 2 web search tools
-- **Iterations**: 3-10 reasoning steps
-
-### Blog Writer Agent
-- **Purpose**: Generate blog posts
-- **Method**: Topic extraction + source selection
-- **Sources**: Papers or web search
-- **Fallback**: Web-based generation
-
-For detailed agent documentation, see [docs/AGENTS.md](docs/AGENTS.md)
+1. Write `src/agents/my_agent.py` exposing `my_node(state) -> dict`.
+2. Add a tool whitelist in `src/tools/__init__.py` (or reuse an existing one).
+3. Register it in `src/graph.py`: `g.add_node("my", my_node)` + edge from router.
+4. Add `"my"` to `Route` in `src/state.py` and to the router's `RouteDecision` enum in `src/agents/router.py`.
+5. Update the router system prompt to know when to pick `my`.
 
 ---
 
-## ⚙️ Configuration
+## Tracing & debugging
 
-### Environment Variables
+If `LANGSMITH_TRACING=true`, every graph run produces a hierarchical trace in your LangSmith project (`LANGSMITH_PROJECT`). Each node is a child run; tool calls, prompts, and token usage are all captured. Useful for:
 
-```bash
-# Required
-export OPENAI_API_KEY='your-api-key-here'
-
-# Optional
-export OPENAI_MODEL='gpt-4'  # Default: gpt-4o-mini
-```
-
-### Paper Sources
-
-Place PDF files in the `datasets/` directory:
-```
-datasets/
-├── paper1.pdf
-├── paper2.pdf
-└── paper3.pdf
-```
-
-### UI Settings
-
-- **Max Reasoning Steps**: 3-10 (default: 5)
-- **Writing Style**: Technical/Professional/Casual
-- **Output Length**: 300/500/800 words
-- **Show Reasoning**: Enable/disable reasoning trace
+- Seeing which agent the router picked and why.
+- Inspecting the query-expansion output that fed retrieval.
+- Diagnosing why the output guard blocked a response.
+- Comparing latency across model tiers.
 
 ---
 
-## 📁 Project Structure
+## License
 
-```
-Agentic/
-├── README.md                      # This file
-├── requirements.txt               # Python dependencies
-├── gradio_app_single_agent.py    # Main application
-├── gradio_app_multi_agent.py     # Alternative UI
-│
-├── router_agent.py               # Router Agent implementation
-├── research_agent.py             # ResearchAssistant (base)
-├── react_agent.py                # ReAct Agent wrapper
-├── smart_blog_writer.py          # Blog Writer Agent
-├── web_tools.py                  # Web search tools
-├── arxiv_downloader.py           # arXiv integration
-├── utils.py                      # Utility functions
-│
-├── datasets/                     # PDF storage
-│   ├── paper1.pdf
-│   └── paper2.pdf
-│
-├── blog_posts/                   # Generated blogs
-│   └── blog_2025-11-27_topic.txt
-│
-└── docs/                         # Documentation
-    ├── ARCHITECTURE.md           # System architecture
-    ├── AGENTS.md                 # Agent details
-    ├── FALLBACKS.md              # Fallback mechanisms
-    └── EXAMPLES.md               # Usage examples
-```
-
----
-
-## 🔧 Advanced Features
-
-### ReAct Reasoning
-
-The Q&A agent uses the ReAct (Reasoning + Acting) pattern:
-
-```
-Iteration 1:
-  💭 Thought: "I need to understand what RAG is"
-  🔧 Action: Use vector_search tool
-  👁️ Observation: [Results from paper]
-
-Iteration 2:
-  💭 Thought: "Now I need specific examples"
-  🔧 Action: Use summary tool
-  👁️ Observation: [Summary results]
-
-Iteration 3:
-  💭 Thought: "I have enough information"
-  🔧 Action: FINISH
-  ✅ Generate final answer
-```
-
-### Fallback Mechanisms
-
-1. **Router Agent**: Falls back to keyword-based routing if LLM fails
-2. **Blog Writer**: Falls back to web search if no papers found
-3. **Error Handling**: Graceful degradation with informative messages
-
-See [docs/FALLBACKS.md](docs/FALLBACKS.md) for details.
-
----
-
-## 📚 Documentation
-
-- **[ARCHITECTURE.md](docs/ARCHITECTURE.md)**: Detailed system architecture
-- **[AGENTS.md](docs/AGENTS.md)**: Agent implementations and capabilities
-- **[FALLBACKS.md](docs/FALLBACKS.md)**: Fallback mechanisms and error handling
-- **[EXAMPLES.md](docs/EXAMPLES.md)**: Usage examples and best practices
-
----
-
-## 🎓 Examples
-
-### Complex Q&A Query
-
-```
-Query: "Compare the autonomous agent approaches across papers 
-        and explain their real-world applications"
-
-Result:
-- Router → Q&A Agent (95% confidence)
-- ReAct performs 5 reasoning iterations
-- Uses 4 different tools across 2 papers
-- Synthesizes comprehensive comparison
-```
-
-### Blog Generation
-
-```
-Query: "Write a professional blog about RAG systems"
-
-Result:
-- Router → Blog Writer (95% confidence)
-- Extracts topic: "RAG systems"
-- Finds 3 relevant papers
-- Generates 500-word professional blog
-```
-
-See [docs/EXAMPLES.md](docs/EXAMPLES.md) for more examples.
-
----
-
-## 🛠️ Troubleshooting
-
-### Common Issues
-
-**Issue**: "OPENAI_API_KEY not set"
-```bash
-export OPENAI_API_KEY='your-key-here'
-```
-
-**Issue**: "No papers found"
-- Enable "Load existing papers" checkbox
-- Or enable arXiv download
-- Or upload a PDF manually
-
-**Issue**: "SSL Certificate Error"
-- System automatically bypasses SSL verification
-- Check internet connection
-
-**Issue**: "Agent takes too long"
-- Reduce max reasoning steps (3-5)
-- Use fewer papers
-- Check API rate limits
-
----
-
-## 🔬 Technical Details
-
-### Technologies Used
-
-- **LLM**: OpenAI GPT-4o-mini
-- **Framework**: LlamaIndex
-- **UI**: Gradio
-- **Embeddings**: OpenAI text-embedding-3-small
-- **Vector Store**: In-memory (LlamaIndex)
-- **Web Search**: DuckDuckGo
-
-### Performance
-
-- **Router Decision**: ~1 second
-- **Q&A Query**: 10-30 seconds (depends on iterations)
-- **Blog Generation**: 15-45 seconds (depends on sources)
-- **Paper Loading**: ~1 second per paper
-
----
-
-## 📈 Future Enhancements
-
-- [ ] Add more specialized agents (Code Generator, Data Analyst)
-- [ ] Implement parallel tool execution
-- [ ] Add conversation memory
-- [ ] Support more LLM providers
-- [ ] Add paper summarization caching
-- [ ] Implement agent collaboration
-- [ ] Add evaluation metrics
-
----
-
-## 🤝 Contributing
-
-Contributions are welcome! Please:
-
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Add tests if applicable
-5. Submit a pull request
-
----
-
-## 🙏 Acknowledgments
-
-- Built with [LlamaIndex](https://www.llamaindex.ai/)
-- UI powered by [Gradio](https://gradio.app/)
-- Inspired by the ReAct paper: [Yao et al., 2023](https://arxiv.org/abs/2210.03629)
-
-
----
-
-## 🎯 Quick Reference
-
-### Commands
-
-```bash
-# Run main app
-python gradio_app_single_agent.py
-
-# Run alternative UI
-python gradio_app_multi_agent.py
-
-# Download papers from arXiv
-python arxiv_downloader.py
-```
-
-### Query Templates
-
-**Q&A:**
-- "What are [concept] in [topic]?"
-- "Compare [approach A] and [approach B]"
-- "Explain [concept] from the papers"
-
-**Blog:**
-- "Write a [style] blog about [topic]"
-- "Create an article on [topic]"
-- "Generate a post about [topic]"
-
----
-
-
+Add yours here.

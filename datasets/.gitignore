@@ -1,0 +1,4 @@
+# Ignore all dataset contents (PDFs are per-user), but keep this directory
+# present in git so the app's expected layout exists at clone time.
+*
+!.gitignore
