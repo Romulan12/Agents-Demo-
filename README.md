@@ -215,8 +215,3 @@ If `LANGSMITH_TRACING=true`, every graph run produces a hierarchical trace in yo
 - Diagnosing why the output guard blocked a response.
 - Comparing latency across model tiers.
 
----
-
-## License
-
-Add yours here.
