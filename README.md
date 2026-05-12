@@ -164,10 +164,6 @@ src/
     arxiv.py                    arxiv_search, arxiv_download (auto-ingests)
     web.py                      web_search, scrape_url
 
-scripts/
-  push_prompts.py               One-time push of in-code prompts to LangSmith Hub
-                                (optional — requires a key with prompt-write perms)
-
 datasets/                       Drop PDFs here for ingestion (gitignored content)
 data/                           Chroma store + checkpoint sqlite (gitignored)
 ```
